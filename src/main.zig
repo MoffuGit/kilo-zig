@@ -14,14 +14,33 @@ pub fn main() !void {
     var new_settings = old_settings;
     new_settings.lflag.ECHO = false;
     new_settings.lflag.ICANON = false;
+    new_settings.lflag.ISIG = false;
+    new_settings.lflag.IEXTEN = false;
+
+    new_settings.iflag.IXON = false;
+    new_settings.iflag.ICRNL = false;
+    new_settings.iflag.INPCK = false;
+    new_settings.iflag.BRKINT = false;
+    new_settings.iflag.ISTRIP = false;
+
+    new_settings.oflag.OPOST = false;
+
+    new_settings.cflag.CSTOPB = false;
+
+    new_settings.cc[@intFromEnum(posix.V.MIN)] = 1;
+    new_settings.cc[@intFromEnum(posix.V.TIME)] = 0;
 
     _ = try posix.tcsetattr(tty_fd, posix.TCSA.NOW, new_settings);
 
-    debug.print("--- starting input --- (press 'q' to quit)\n", .{});
+    debug.print("--- starting input --- (press 'q' to quit)\n\r", .{});
 
-    var buffer: [1]u8 = undefined;
-    while (true and buffer[0] != 'q') {
+    while (true) {
+        var buffer: [1]u8 = undefined;
         _ = try tty_file.read(&buffer);
+
+        if (buffer[0] == 'q') {
+            break;
+        }
 
         if (ascii.isControl(buffer[0])) {
             debug.print("input: {}\r\n", .{
