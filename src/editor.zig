@@ -15,6 +15,9 @@ winSize: posix.winsize = .{
     .xpixel = 0,
     .ypixel = 0,
 },
+cursorPosition: CursorPosition = CursorPosition{ .x = 0, .y = 0 },
+
+const CursorPosition = struct { x: usize, y: usize };
 
 pub fn init() Editor {
     var stdin_buf: [4096]u8 = undefined;
@@ -53,9 +56,39 @@ pub fn run(self: *Editor) !void {
         if (char == ctrlKey('q')) {
             break;
         }
+        self.processKeyPress(char);
     }
 
+    try self.write("\x1b[2J");
+    try self.write("\x1b[H");
+
     try self.disableRawMode();
+}
+
+fn processKeyPress(self: *Editor, char: u8) void {
+    switch (char) {
+        'h' => {
+            if (self.cursorPosition.x != 0) {
+                self.cursorPosition.x = self.cursorPosition.x - 1;
+            }
+        },
+        'l' => {
+            if (self.winSize.col - 1 != self.cursorPosition.x) {
+                self.cursorPosition.x = self.cursorPosition.x + 1;
+            }
+        },
+        'k' => {
+            if (self.cursorPosition.y != 0) {
+                self.cursorPosition.y = self.cursorPosition.y - 1;
+            }
+        },
+        'j' => {
+            if (self.winSize.row - 1 != self.cursorPosition.y) {
+                self.cursorPosition.y = self.cursorPosition.y + 1;
+            }
+        },
+        else => {},
+    }
 }
 
 pub fn enableRawMode(self: *Editor) !void {
@@ -63,20 +96,21 @@ pub fn enableRawMode(self: *Editor) !void {
     termios = try posix.tcgetattr(stdin.handle);
     self.origTermios = termios;
 
-    termios.lflag.ECHO = false;
-    termios.lflag.ICANON = false;
-    termios.lflag.ISIG = false;
-    termios.lflag.IEXTEN = false;
-
-    termios.iflag.IXON = false;
+    termios.iflag.BRKINT = false;
     termios.iflag.ICRNL = false;
     termios.iflag.INPCK = false;
-    termios.iflag.BRKINT = false;
     termios.iflag.ISTRIP = false;
+    termios.iflag.IXON = false;
+    termios.iflag.IUTF8 = false;
 
     termios.oflag.OPOST = false;
 
-    termios.cflag.CSTOPB = false;
+    termios.cflag.CSIZE = std.posix.CSIZE.CS8;
+
+    termios.lflag.ECHO = false;
+    termios.lflag.ICANON = false;
+    termios.lflag.IEXTEN = false;
+    termios.lflag.ISIG = false;
 
     termios.cc[@intFromEnum(posix.V.MIN)] = 1;
     termios.cc[@intFromEnum(posix.V.TIME)] = 0;
@@ -103,7 +137,7 @@ pub fn refreshScreen(self: *Editor) !void {
     try self.write("\x1b[?25l");
     try self.write("\x1b[H");
     try self.drawRows();
-    try self.write("\x1b[H");
+    try self.writer.print("\x1b[{};{}H", .{ self.cursorPosition.y + 1, self.cursorPosition.x + 1 });
     try self.write("\x1b[?25h");
 }
 
