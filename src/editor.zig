@@ -19,6 +19,26 @@ cursorPosition: CursorPosition = CursorPosition{ .x = 0, .y = 0 },
 
 const CursorPosition = struct { x: usize, y: usize };
 
+const EditorKey = union(enum) {
+    cursor: CursorKey,
+    notImpl: void,
+    quit: void,
+    esc: void,
+    none: void,
+    page_up: void,
+    page_down: void,
+    home_key: void,
+    end_key: void,
+    delete_key: void,
+};
+
+const CursorKey = enum(u8) {
+    up = 'k',
+    down = 'j',
+    left = 'h',
+    right = 'l',
+};
+
 pub fn init() Editor {
     var stdin_buf: [4096]u8 = undefined;
     var stdin_reader = stdin.reader(&stdin_buf);
@@ -51,12 +71,16 @@ pub fn run(self: *Editor) !void {
 
     while (true) {
         try self.refreshScreen();
-        try self.flush();
-        const char = try self.readKey();
-        if (char == ctrlKey('q')) {
+        var key: EditorKey = undefined;
+
+        key = self.readKey() catch EditorKey{ .none = {} };
+        if (key == .none) {
+            continue;
+        }
+        if (key == .quit) {
             break;
         }
-        self.processKeyPress(char);
+        self.processKey(key);
     }
 
     try self.write("\x1b[2J");
@@ -65,29 +89,35 @@ pub fn run(self: *Editor) !void {
     try self.disableRawMode();
 }
 
-fn processKeyPress(self: *Editor, char: u8) void {
-    switch (char) {
-        'h' => {
+fn processKey(self: *Editor, key: EditorKey) void {
+    switch (key) {
+        .cursor => |cursor| self.processCursorKey(cursor),
+        else => {},
+    }
+}
+
+fn processCursorKey(self: *Editor, key: CursorKey) void {
+    switch (key) {
+        .left => {
             if (self.cursorPosition.x != 0) {
                 self.cursorPosition.x = self.cursorPosition.x - 1;
             }
         },
-        'l' => {
+        .right => {
             if (self.winSize.col - 1 != self.cursorPosition.x) {
                 self.cursorPosition.x = self.cursorPosition.x + 1;
             }
         },
-        'k' => {
+        .up => {
             if (self.cursorPosition.y != 0) {
                 self.cursorPosition.y = self.cursorPosition.y - 1;
             }
         },
-        'j' => {
+        .down => {
             if (self.winSize.row - 1 != self.cursorPosition.y) {
                 self.cursorPosition.y = self.cursorPosition.y + 1;
             }
         },
-        else => {},
     }
 }
 
@@ -112,8 +142,8 @@ pub fn enableRawMode(self: *Editor) !void {
     termios.lflag.IEXTEN = false;
     termios.lflag.ISIG = false;
 
-    termios.cc[@intFromEnum(posix.V.MIN)] = 1;
-    termios.cc[@intFromEnum(posix.V.TIME)] = 0;
+    termios.cc[@intFromEnum(posix.V.MIN)] = 0;
+    termios.cc[@intFromEnum(posix.V.TIME)] = 1;
 
     try posix.tcsetattr(stdin.handle, posix.TCSA.NOW, termios);
 }
@@ -139,6 +169,7 @@ pub fn refreshScreen(self: *Editor) !void {
     try self.drawRows();
     try self.writer.print("\x1b[{};{}H", .{ self.cursorPosition.y + 1, self.cursorPosition.x + 1 });
     try self.write("\x1b[?25h");
+    try self.flush();
 }
 
 pub fn drawRows(self: *Editor) !void {
@@ -172,6 +203,68 @@ pub fn updateWindowSize(self: *Editor) !void {
     }
 }
 
-pub fn readKey(self: *Editor) !u8 {
-    return try self.reader.takeByte();
+pub fn readKey(self: *Editor) !EditorKey {
+    const char: u8 = try self.reader.takeByte();
+    var key: EditorKey = undefined;
+
+    switch (char) {
+        'k', 'j', 'h', 'l' => key = EditorKey{ .cursor = @enumFromInt(char) },
+        '\x1b' => {
+            const next_char_result = self.reader.takeByte();
+
+            if (next_char_result == error.EndOfStream) {
+                return EditorKey{ .quit = {} };
+            }
+
+            const next_char = try next_char_result;
+
+            if (next_char == '[') {
+                const third_char_result = self.reader.takeByte();
+                if (third_char_result == error.EndOfStream) {
+                    return EditorKey{ .notImpl = {} };
+                }
+                const third_char = try third_char_result;
+
+                switch (third_char) {
+                    'A' => key = EditorKey{ .cursor = CursorKey.up },
+                    'B' => key = EditorKey{ .cursor = CursorKey.down },
+                    'C' => key = EditorKey{ .cursor = CursorKey.right },
+                    'D' => key = EditorKey{ .cursor = CursorKey.left },
+                    'H' => key = EditorKey{ .home_key = {} },
+                    'F' => key = EditorKey{ .end_key = {} },
+                    '1', '2', '3', '4', '5', '6' => {
+                        const fourth_char_result = self.reader.takeByte();
+                        if (fourth_char_result == error.EndOfStream) {
+                            return EditorKey{ .notImpl = {} };
+                        }
+                        const fourth_char = try fourth_char_result;
+
+                        if (fourth_char == '~') {
+                            switch (third_char) {
+                                '1' => key = EditorKey{ .home_key = {} },
+                                '3' => key = EditorKey{ .delete_key = {} },
+                                '4' => key = EditorKey{ .end_key = {} },
+                                '5' => key = EditorKey{ .page_up = {} },
+                                '6' => key = EditorKey{ .page_down = {} },
+                                else => key = EditorKey{ .notImpl = {} },
+                            }
+                        } else {
+                            key = EditorKey{ .notImpl = {} };
+                        }
+                    },
+                    else => key = EditorKey{ .notImpl = {} },
+                }
+            } else {
+                key = EditorKey{ .quit = {} };
+            }
+        },
+        else => {
+            if (char == ctrlKey('q')) {
+                key = EditorKey{ .quit = {} };
+            } else {
+                key = EditorKey{ .notImpl = {} };
+            }
+        },
+    }
+    return key;
 }
