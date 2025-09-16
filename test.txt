@@ -320,3 +320,4 @@ pub fn readKey(self: *Editor) !EditorKey {
     }
     return key;
 }
+
