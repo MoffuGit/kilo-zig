@@ -6,6 +6,7 @@ const ascii = std.ascii;
 const stdin = std.fs.File.stdin();
 const stdout = std.fs.File.stdout();
 const Allocator = std.mem.Allocator;
+const Instant = std.time.Instant;
 
 alloc: Allocator,
 stdin_fs_reader: std.fs.File.Reader = undefined,
@@ -28,6 +29,8 @@ colsOff: usize = 0,
 stdin_buffer: [4096]u8,
 stdout_buffer: [4096]u8,
 fileName: []u8,
+statusMsg: []u8,
+statusMsgTimer: Instant,
 
 const CursorPosition = struct { x: usize, y: usize };
 const Row = struct {
@@ -63,6 +66,8 @@ pub fn init(alloc: Allocator) !Editor {
         .cursorPosition = CursorPosition{ .x = 0, .y = 0 },
         .numRows = 0,
         .fileName = try alloc.dupe(u8, "[No Name]"),
+        .statusMsgTimer = try Instant.now(),
+        .statusMsg = try alloc.alloc(u8, 0),
         .rows = try std.ArrayList(Row).initCapacity(alloc, 0),
         .stdin_buffer = undefined,
         .stdout_buffer = undefined,
@@ -89,7 +94,16 @@ pub fn deinit(self: *Editor) void {
         }
     }
     self.alloc.free(self.fileName);
+    self.alloc.free(self.statusMsg);
     self.rows.deinit(self.alloc);
+}
+
+pub fn setStatusName(self: *Editor, msg: []const u8) !void {
+    if (self.statusMsg.len > 0) {
+        self.alloc.free(self.statusMsg);
+    }
+    self.statusMsg = try self.alloc.dupe(u8, msg);
+    self.statusMsgTimer = try Instant.now();
 }
 
 pub fn open(self: *Editor, file: std.fs.File, name: []const u8) !void {
@@ -154,6 +168,8 @@ fn ctrlKey(char: u8) u8 {
 pub fn run(self: *Editor) !void {
     try self.enableRawMode();
     try self.updateWindowSize();
+
+    try self.setStatusName("HELP: Ctrl-Q = quit");
 
     while (true) {
         try self.refreshScreen();
@@ -311,6 +327,10 @@ pub fn refreshScreen(self: *Editor) !void {
 pub fn drawStatusBar(self: *Editor) !void {
     try self.write("\x1b[7m");
 
+    const now = try std.time.Instant.now();
+    const elapsed_ns = now.since(self.statusMsgTimer);
+    const display_timed_status_msg = (self.statusMsg.len > 0 and elapsed_ns < 5 * std.time.ns_per_s);
+
     var right_status_buffer: [32]u8 = undefined;
     const right_status_slice = try std.fmt.bufPrint(
         right_status_buffer[0..],
@@ -318,6 +338,11 @@ pub fn drawStatusBar(self: *Editor) !void {
         .{ self.cursorPosition.y + 1, self.numRows },
     );
     const right_status_len: usize = right_status_slice.len;
+
+    var status_line_builder = try std.ArrayList(u8).initCapacity(self.alloc, 0);
+    defer status_line_builder.deinit(self.alloc);
+
+    var current_width: usize = 0;
 
     var left_status_buffer: [256]u8 = undefined;
     const left_status_slice = try std.fmt.bufPrint(
@@ -327,31 +352,55 @@ pub fn drawStatusBar(self: *Editor) !void {
     );
     const left_status_len: usize = left_status_slice.len;
 
-    var left_content_available_width: usize = self.winSize.col;
-    var should_print_right_status = false;
+    const max_left_content_width = if (self.winSize.col > right_status_len) self.winSize.col - right_status_len else 0;
+    const actual_left_content_len = @min(left_status_len, max_left_content_width);
 
-    if (self.winSize.col >= right_status_len + 1) {
-        left_content_available_width = self.winSize.col - right_status_len - 1;
-        should_print_right_status = true;
+    try status_line_builder.appendSlice(self.alloc, left_status_slice[0..actual_left_content_len]);
+    current_width += actual_left_content_len;
+
+    if (display_timed_status_msg) {
+        const msg_to_display = self.statusMsg;
+        const msg_len = msg_to_display.len;
+
+        const available_for_msg_and_padding = if (self.winSize.col > current_width + right_status_len)
+            self.winSize.col - current_width - right_status_len
+        else
+            0;
+
+        const actual_msg_len = @min(msg_len, available_for_msg_and_padding);
+
+        if (actual_msg_len > 0) {
+            var padding_left: usize = 0;
+            if (actual_msg_len < available_for_msg_and_padding) {
+                padding_left = (available_for_msg_and_padding - actual_msg_len) / 2;
+            }
+
+            for (0..padding_left) |_| try status_line_builder.append(self.alloc, ' ');
+            current_width += padding_left;
+
+            try status_line_builder.appendSlice(self.alloc, msg_to_display[0..actual_msg_len]);
+            current_width += actual_msg_len;
+        }
+
+        while (current_width < self.winSize.col - right_status_len) : (current_width += 1) {
+            try status_line_builder.append(self.alloc, ' ');
+        }
+    } else {
+        while (current_width < self.winSize.col - right_status_len) : (current_width += 1) {
+            try status_line_builder.append(self.alloc, ' ');
+        }
     }
 
-    const actual_left_content_len = @min(left_status_len, left_content_available_width);
-    try self.writer.writeAll(left_status_slice[0..actual_left_content_len]);
-
-    var padding_len: usize = self.winSize.col - actual_left_content_len;
-    if (should_print_right_status) {
-        padding_len -= right_status_len;
+    if (self.winSize.col >= right_status_len) {
+        try status_line_builder.appendSlice(self.alloc, right_status_slice);
+        current_width += right_status_len;
     }
 
-    var i: usize = 0;
-    while (i < padding_len) : (i += 1) {
-        try self.write(" ");
+    while (current_width < self.winSize.col) : (current_width += 1) {
+        try status_line_builder.append(self.alloc, ' ');
     }
 
-    if (should_print_right_status) {
-        try self.writer.writeAll(right_status_slice);
-    }
-
+    try self.writer.writeAll(status_line_builder.items);
     try self.write("\x1b[m");
 }
 
