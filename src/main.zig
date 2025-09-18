@@ -30,7 +30,7 @@ pub fn main() !void {
 
         if (file_opened_or_created) {
             defer file.close();
-            try editor.open(file);
+            try editor.open(file, filename);
         }
     }
     try editor.run();
